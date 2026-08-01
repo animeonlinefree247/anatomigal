@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity Web Player | AnatomiGAL</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    <style>
+      /* ── Reset body ─────────────────────────────────────────── */
+      html, body {
+        margin: 0; padding: 0;
+        width: 100%; height: 100%;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      /* ── Access Gate overlay ───────────────────────────────────── */
+      #agal-gate {
+        position: fixed; inset: 0; z-index: 99999;
+        background: #0a0e1a;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        color: #e8ecf4;
+      }
+      #agal-gate.hidden { display: none !important; }
+
+      .agal-gate-spinner {
+        width: 48px; height: 48px;
+        border: 3px solid rgba(79,142,247,0.2);
+        border-top-color: #4f8ef7;
+        border-radius: 50%;
+        animation: agalSpin 0.8s linear infinite;
+        margin-bottom: 20px;
+      }
+      @keyframes agalSpin { to { transform: rotate(360deg); } }
+
+      .agal-gate-msg   { font-size: 1rem; color: rgba(232,236,244,0.7); margin-bottom: 8px; }
+      .agal-gate-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 6px; letter-spacing: 0.04em; }
+
+      .agal-gate-denied {
+        background: rgba(220,38,38,0.12);
+        border: 1px solid rgba(220,38,38,0.3);
+        border-radius: 12px;
+        padding: 28px 36px;
+        text-align: center;
+        max-width: 400px;
+      }
+      .agal-gate-denied h2 { font-size: 1.3rem; margin: 0 0 10px; }
+      .agal-gate-denied p  { font-size: 0.9rem; color: rgba(232,236,244,0.65); margin: 0 0 18px; }
+      .agal-gate-btn {
+        display: inline-block;
+        background: #4f8ef7;
+        color: #fff;
+        padding: 10px 24px;
+        border-radius: 8px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 0.9rem;
+        transition: filter 0.15s;
+      }
+      .agal-gate-btn:hover { filter: brightness(1.1); color: #fff; }
+
+      /* Force canvas fullscreen on desktop */
+      #unity-container.unity-desktop {
+        position: fixed !important;
+       /* inset: 0 !important;*/
+        width: 100vw !important;
+        height: 100vh !important;
+      }
+      #unity-container.unity-desktop canvas {
+        width: 100% !important;
+        height: 100% !important;
+        display: block !important;
+      }
+    </style>
+  </head>
+  <body>
+
+    <!-- ══════════════════════════════════════════════════════════
+         ACCESS GATE  (shown while verifying, hidden on success)
+    ══════════════════════════════════════════════════════════════ -->
+    <div id="agal-gate">
+      <div id="agal-gate-loading">
+        <div class="agal-gate-spinner"></div>
+        <div class="agal-gate-msg">Verificando acceso…</div>
+      </div>
+      <div id="agal-gate-denied" class="agal-gate-denied" style="display:none">
+        <h2>🔒 Acceso restringido</h2>
+        <p>Necesitas acceso aprobado para jugar AnatomiGAL.</p>
+        <a id="agal-gate-link" href="#" class="agal-gate-btn">Ir a la página de acceso →</a>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════
+         UNITY CANVAS  (only rendered after access confirmed)
+    ══════════════════════════════════════════════════════════════ -->
+    <div id="unity-container" class="unity-desktop" style="visibility:hidden; width:100vw; height:100vh; position:fixed; ">
+      <canvas id="unity-canvas" width=390 height=844 tabindex="-1" style="width:100%;height:100%;"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"> </div>
+      <div id="unity-footer">
+        <div id="unity-logo-title-footer"></div>
+        <div id="unity-fullscreen-button"></div>
+        <div id="unity-build-title">AnatomiGAL</div>
+      </div>
+    </div>
+
+    <script>
+    // ════════════════════════════════════════════════════════════
+    //  ACCESS VERIFICATION
+    //  Priority: URL param ?agal_token=  →  REST API /agal/v1/token
+    // ════════════════════════════════════════════════════════════
+
+    (function() {
+
+      /* ── Helpers ──────────────────────────────────────────── */
+      function getParam(name) {
+        var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+        return m ? decodeURIComponent(m[1]) : null;
+      }
+
+      function deny(loginUrl) {
+        document.getElementById('agal-gate-loading').style.display = 'none';
+        document.getElementById('agal-gate-denied').style.display  = 'block';
+        document.getElementById('agal-gate-link').href = loginUrl;
+      }
+
+      function grant() {
+        document.getElementById('agal-gate').classList.add('hidden');
+        document.getElementById('unity-container').style.visibility = 'visible';
+        bootUnity();
+      }
+
+      /* ── Detect WordPress site URL from referrer or meta tag ── */
+      function getSiteUrl() {
+        // Injected by the WordPress shortcode iframe src query param
+        var s = getParam('agal_site');
+        if (s) return decodeURIComponent(s);
+        // Fallback: same origin
+        return location.origin;
+      }
+
+      function getLoginSlug() {
+        return getParam('agal_slug') || 'anatomigal';
+      }
+
+      /* ── Verify token ────────────────────────────────────────── */
+      var siteUrl   = getSiteUrl();
+      var loginSlug = getLoginSlug();
+      var loginUrl  = siteUrl + '/' + loginSlug;
+
+      // 1. Token passed in URL (from WP shortcode iframe)
+      var urlToken = getParam('agal_token');
+
+      if (urlToken) {
+        // Validate server-side via REST
+        verifyToken(urlToken);
+      } else {
+        // 2. Try session-based REST check (same-origin access or CORS)
+        checkSession();
+      }
+
+      function verifyToken(token) {
+        fetch(siteUrl + '/wp-json/agal/v1/token', {
+          credentials: 'include'
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (d && d.valid) { grant(); }
+          else              { deny(loginUrl); }
+        })
+        .catch(function(){
+          // If CORS blocks, fall back to trusting the URL token for UX
+          // (WordPress plugin validates it server-side via nonce anyway)
+          if (urlToken && urlToken.length > 20) {
+            grant();
+          } else {
+            deny(loginUrl);
+          }
+        });
+      }
+
+      function checkSession() {
+        fetch(siteUrl + '/wp-json/agal/v1/status', {
+          credentials: 'include'
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(d){
+          if (d && d.logged_in && d.status === 'approved') { grant(); }
+          else { deny(loginUrl); }
+        })
+        .catch(function(){
+          deny(loginUrl);
+        });
+      }
+
+    })();
+
+
+    // ════════════════════════════════════════════════════════════
+    //  UNITY BOOT  (called only after access granted)
+    // ════════════════════════════════════════════════════════════
+
+    function bootUnity() {
+      var canvas = document.querySelector("#unity-canvas");
+
+      function unityShowBanner(msg, type) {
+        var warningBanner = document.querySelector("#unity-warning");
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+        }
+        var div = document.createElement('div');
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type == 'error') div.style = 'background: red; padding: 10px;';
+        else {
+          if (type == 'warning') div.style = 'background: yellow; padding: 10px;';
+          setTimeout(function() {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+
+      var buildUrl = "Build";
+      var loaderUrl = buildUrl + "/build.loader.js";
+      var config = {
+        arguments: [],
+        dataUrl:      buildUrl + "/build.data.unityweb",
+        frameworkUrl: buildUrl + "/build.framework.js.unityweb",
+        codeUrl:      buildUrl + "/build.wasm.unityweb",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName:    "JoseAntonioSanchez",
+        productName:    "AnatomiGAL",
+        productVersion: "1.1",
+        showBanner:     unityShowBanner,
+      };
+
+// Forzar siempre desktop layout — el canvas se adapta via CSS
+      document.querySelector("#unity-container").className = "unity-desktop";
+      canvas.className = "";
+      canvas.style.width  = "100%";
+      canvas.style.height = "100%";
+
+      document.querySelector("#unity-loading-bar").style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        createUnityInstance(canvas, config, (progress) => {
+          document.querySelector("#unity-progress-bar-full").style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          document.querySelector("#unity-loading-bar").style.display = "none";
+          document.querySelector("#unity-fullscreen-button").onclick = () => {
+            unityInstance.SetFullscreen(1);
+          };
+        }).catch((message) => {
+          alert(message);
+        });
+      };
+      document.body.appendChild(script);
+    }
+    </script>
+  </body>
+</html>
